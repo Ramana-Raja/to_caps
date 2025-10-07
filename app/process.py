@@ -22,5 +22,6 @@ def main():
 
     print(f"Processed {input_key} → {output_key}")
 
+
 if __name__ == "__main__":
     main()
