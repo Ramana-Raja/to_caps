@@ -1,0 +1,66 @@
+name: Deploy to EKS
+
+on:
+  workflow_run:
+    workflows: ["Build and Push Docker Image to ECR"]
+    types:
+      - completed
+  push:
+    branches:
+      - main
+    paths:
+      - 'k8s/**'
+  workflow_dispatch:
+
+env:
+  AWS_REGION: ap-south-1
+  EKS_CLUSTER_NAME: data-processor-eks
+  K8S_NAMESPACE: data-processing
+
+jobs:
+  deploy:
+    name: Deploy to Kubernetes
+    runs-on: ubuntu-latest
+    if: ${{ github.event.workflow_run.conclusion == 'success' || github.event_name == 'push' || github.event_name == 'workflow_dispatch' }}
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Install kubectl
+        uses: azure/setup-kubectl@v4
+        with:
+          version: 'latest'
+
+      - name: Configure kubectl
+        run: |
+          aws eks update-kubeconfig --region ${{ env.AWS_REGION }} --name ${{ env.EKS_CLUSTER_NAME }}
+          kubectl version --client
+
+      - name: Deploy Kubernetes resources
+        run: |
+          kubectl apply -f k8s/namespace.yaml
+          kubectl apply -f k8s/service-account.yaml
+          kubectl apply -f k8s/cronjob.yaml
+
+      - name: Verify deployment
+        run: |
+          kubectl get cronjobs -n ${{ env.K8S_NAMESPACE }}
+          kubectl get serviceaccount -n ${{ env.K8S_NAMESPACE }}
+
+      - name: Create test job
+        run: |
+          kubectl create job --from=cronjob/data-processor-cronjob manual-test-${{ github.run_number }} -n ${{ env.K8S_NAMESPACE }} || true
+
+      - name: Wait for job completion
+        run: |
+          sleep 30
+          kubectl get jobs -n ${{ env.K8S_NAMESPACE }}
+          kubectl get pods -n ${{ env.K8S_NAMESPACE }}
