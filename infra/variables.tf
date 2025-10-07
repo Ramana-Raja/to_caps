@@ -13,25 +13,25 @@ variable "environment" {
 variable "project_name" {
   description = "Project name used for resource naming"
   type        = string
-  default     = "data-processor"
+  default     = "data-processor-v2"
 }
 
 variable "raw_bucket_name" {
   description = "Name of the S3 bucket for raw input data (must be globally unique)"
   type        = string
-  default     = "raw-data-devops-mumbai-2025-55522215"
+  default     = "raw-data-devops-mumbai-2025-55522215-v2"
 }
 
 variable "processed_bucket_name" {
   description = "Name of the S3 bucket for processed output data (must be globally unique)"
   type        = string
-  default     = "processed-data-devops-mumbai-2025-55522215"
+  default     = "processed-data-devops-mumbai-2025-55522215-v2"
 }
 
 variable "eks_cluster_name" {
   description = "Name of the EKS cluster"
   type        = string
-  default     = "data-processor-eks"
+  default     = "data-processor-eks-v2"
 }
 
 variable "eks_node_instance_type" {

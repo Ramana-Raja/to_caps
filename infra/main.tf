@@ -258,7 +258,7 @@ resource "aws_eks_node_group" "main" {
 }
 
 resource "aws_ecr_repository" "data_processor" {
-  name                 = "data-processor"
+  name                 = "data-processor-v2"
   image_tag_mutability = "MUTABLE"
 
   tags = {
