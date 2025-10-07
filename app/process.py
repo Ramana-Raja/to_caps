@@ -4,7 +4,6 @@ import os
 
 def main():
     s3 = boto3.client("s3")
-
     raw_bucket = os.getenv("RAW_BUCKET", "raw-data")
     processed_bucket = os.getenv("PROCESSED_BUCKET", "processed-data")
     input_key = os.getenv("INPUT_KEY", "input.csv")
