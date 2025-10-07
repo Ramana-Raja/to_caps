@@ -1,0 +1,49 @@
+apiVersion: batch/v1
+kind: CronJob
+metadata:
+  name: data-processor-cronjob
+  namespace: data-processing
+  labels:
+    app: data-processor
+spec:
+  schedule: "0 0 * * *"
+
+  successfulJobsHistoryLimit: 3
+  failedJobsHistoryLimit: 1
+
+  jobTemplate:
+    spec:
+      backoffLimit: 3
+
+      template:
+        metadata:
+          labels:
+            app: data-processor
+        spec:
+          serviceAccountName: s3-processor-sa
+
+          containers:
+            - name: data-processor
+              image: 127214186803.dkr.ecr.ap-south-1.amazonaws.com/data-processor:latest
+              imagePullPolicy: Always
+
+              env:
+                - name: RAW_BUCKET
+                  value: "raw-data-devops-mumbai-2025-55522215"
+                - name: PROCESSED_BUCKET
+                  value: "processed-data-devops-mumbai-2025-55522215"
+                - name: INPUT_KEY
+                  value: "input.csv"
+                - name: OUTPUT_KEY
+                  value: "output.csv"
+                - name: AWS_DEFAULT_REGION
+                  value: "ap-south-1"
+              resources:
+                requests:
+                  memory: "256Mi"
+                  cpu: "100m"
+                limits:
+                  memory: "1Gi"
+                  cpu: "500m"
+
+          restartPolicy: OnFailure
