@@ -1,0 +1,238 @@
+name: Main Deployment Pipeline
+
+on:
+  push:
+    branches:
+      - main
+  workflow_dispatch:
+
+env:
+  AWS_REGION: ap-south-1
+  EKS_CLUSTER_NAME: data-processor-eks
+  ECR_REPOSITORY: data-processor
+  K8S_NAMESPACE: data-processing
+  TF_VERSION: 1.5.0
+
+jobs:
+  terraform:
+    name: 1. Apply Terraform Infrastructure
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Setup Terraform
+        uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: ${{ env.TF_VERSION }}
+          terraform_wrapper: false
+
+      - name: Terraform Init
+        working-directory: ./infra
+        run: terraform init
+
+      - name: Terraform Plan
+        working-directory: ./infra
+        run: terraform plan
+
+      - name: Terraform Apply
+        working-directory: ./infra
+        run: terraform apply -auto-approve
+
+      - name: Display Terraform Outputs
+        working-directory: ./infra
+        run: |
+          echo "Terraform Outputs"
+          terraform output
+
+      - name: Wait for Infrastructure Stabilization
+        run: |
+          echo "Waiting 90 seconds for infrastructure to stabilize..."
+          sleep 90
+
+  upload-data:
+    name: 2. Upload Sample Data to S3
+    runs-on: ubuntu-latest
+    needs: [terraform]
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Setup Terraform
+        uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: ${{ env.TF_VERSION }}
+          terraform_wrapper: false
+
+      - name: Terraform Init
+        working-directory: ./infra
+        run: terraform init
+
+      - name: Get S3 Bucket Name
+        id: get-bucket
+        working-directory: ./infra
+        run: |
+          RAW_BUCKET=$(terraform output -raw raw_data_bucket_name)
+          echo "raw_bucket=$RAW_BUCKET" >> $GITHUB_OUTPUT
+          echo "Raw data bucket: $RAW_BUCKET"
+
+      - name: Upload Sample CSV to S3
+        run: |
+          RAW_BUCKET=${{ steps.get-bucket.outputs.raw_bucket }}
+          echo "Uploading data/sample_input.csv to s3://$RAW_BUCKET/input.csv"
+          aws s3 cp data/sample_input.csv s3://$RAW_BUCKET/input.csv
+          echo "Sample data uploaded successfully"
+
+      - name: Verify Upload
+        run: |
+          RAW_BUCKET=${{ steps.get-bucket.outputs.raw_bucket }}
+          echo "Files in raw data bucket:"
+          aws s3 ls s3://$RAW_BUCKET/
+
+  docker:
+    name: 3. Build and Push Docker Image
+    runs-on: ubuntu-latest
+    needs: [terraform, upload-data]
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Login to Amazon ECR
+        id: login-ecr
+        uses: aws-actions/amazon-ecr-login@v2
+
+      - name: Build Docker Image
+        env:
+          ECR_REGISTRY: ${{ steps.login-ecr.outputs.registry }}
+          IMAGE_TAG: ${{ github.sha }}
+        run: |
+          cd app
+          echo "Building Docker image..."
+          docker build -t $ECR_REGISTRY/$ECR_REPOSITORY:$IMAGE_TAG .
+          docker tag $ECR_REGISTRY/$ECR_REPOSITORY:$IMAGE_TAG $ECR_REGISTRY/$ECR_REPOSITORY:latest
+
+      - name: Push Docker Image to ECR
+        env:
+          ECR_REGISTRY: ${{ steps.login-ecr.outputs.registry }}
+          IMAGE_TAG: ${{ github.sha }}
+        run: |
+          echo "Pushing Docker image to ECR..."
+          docker push $ECR_REGISTRY/$ECR_REPOSITORY:$IMAGE_TAG
+          docker push $ECR_REGISTRY/$ECR_REPOSITORY:latest
+          echo "Image pushed: $ECR_REGISTRY/$ECR_REPOSITORY:latest"
+          echo "Image pushed: $ECR_REGISTRY/$ECR_REPOSITORY:$IMAGE_TAG"
+
+  kubernetes:
+    name: 4. Deploy to Kubernetes
+    runs-on: ubuntu-latest
+    needs: [terraform, upload-data, docker]
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Install kubectl
+        uses: azure/setup-kubectl@v4
+        with:
+          version: 'latest'
+
+      - name: Configure kubectl
+        run: |
+          echo "Configuring kubectl..."
+          aws eks update-kubeconfig --region ${{ env.AWS_REGION }} --name ${{ env.EKS_CLUSTER_NAME }}
+          kubectl version --client
+          kubectl cluster-info
+
+      - name: Deploy Namespace
+        run: |
+          echo "Deploying namespace..."
+          kubectl apply -f k8s/namespace.yaml
+          echo "Namespace applied"
+
+      - name: Deploy ServiceAccount with IRSA
+        run: |
+          echo "Deploying ServiceAccount with IRSA..."
+          kubectl apply -f k8s/service-account.yaml
+          echo "ServiceAccount applied"
+          kubectl describe serviceaccount s3-processor-sa -n ${{ env.K8S_NAMESPACE }}
+
+      - name: Deploy CronJob
+        run: |
+          echo "Deploying CronJob..."
+          kubectl apply -f k8s/cronjob.yaml
+          echo "CronJob applied"
+          kubectl get cronjobs -n ${{ env.K8S_NAMESPACE }}
+
+      - name: Verify All Resources
+        run: |
+          echo "Verifying all Kubernetes resources:"
+          kubectl get all -n ${{ env.K8S_NAMESPACE }}
+
+      - name: Create Test Job
+        run: |
+          echo "Creating test job from CronJob..."
+          kubectl create job --from=cronjob/data-processor-cronjob ci-test-${{ github.run_number }} -n ${{ env.K8S_NAMESPACE }} || true
+          echo "Waiting 45 seconds for job to complete..."
+          sleep 45
+
+      - name: Check Job Status
+        run: |
+          echo "Job status:"
+          kubectl get jobs -n ${{ env.K8S_NAMESPACE }}
+          echo ""
+          echo "Pod status:"
+          kubectl get pods -n ${{ env.K8S_NAMESPACE }}
+
+      - name: Get Pod Logs
+        run: |
+          echo "Fetching pod logs..."
+          POD_NAME=$(kubectl get pods -n ${{ env.K8S_NAMESPACE }} -l job-name=ci-test-${{ github.run_number }} -o jsonpath='{.items[0].metadata.name}' 2>/dev/null || echo "")
+          if [ ! -z "$POD_NAME" ]; then
+            echo "Pod: $POD_NAME"
+            echo "Pod Logs"
+            kubectl logs $POD_NAME -n ${{ env.K8S_NAMESPACE }} || echo "Logs not available yet"
+          else
+            echo "Pod not found or not yet created"
+          fi
+
+      - name: Verify Processed Data in S3
+        run: |
+          echo "Checking for processed data in S3..."
+          PROCESSED_BUCKET=$(aws s3 ls | grep processed-data-devops-mumbai | awk '{print $3}')
+          if [ ! -z "$PROCESSED_BUCKET" ]; then
+            echo "Processed data bucket: $PROCESSED_BUCKET"
+            aws s3 ls s3://$PROCESSED_BUCKET/ || echo "No processed files yet (job may still be running)"
+          else
+            echo "Could not determine processed bucket name"
+          fi
